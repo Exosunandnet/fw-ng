@@ -1,0 +1,189 @@
+#!/bin/bash
+# Colours
+greenColour="\e[0;32m\033[1m"
+endColour="\033[0m\e[0m"
+redColour="\e[0;31m\033[1m"
+blueColour="\e[0;34m\033[1m"
+yellowColour="\e[0;33m\033[1m"
+purpleColour="\e[0;35m\033[1m"
+turquoiseColour="\e[0;36m\033[1m"
+grayColour="\e[0;37m\033[1m"
+
+# Drop ICMP echo-request messages sent to broadcast or multicast addresses
+echo 1 > /proc/sys/net/ipv4/icmp_echo_ignore_broadcasts
+
+# Drop source routed packets
+echo 0 > /proc/sys/net/ipv4/conf/all/accept_source_route
+
+# Enable TCP SYN cookie protection from SYN floods
+echo 1 > /proc/sys/net/ipv4/tcp_syncookies
+
+# Don't accept ICMP redirect messages
+echo 0 > /proc/sys/net/ipv4/conf/all/accept_redirects
+
+# Don't send ICMP redirect messages
+echo 0 > /proc/sys/net/ipv4/conf/all/send_redirects
+
+# Enable source address spoofing protection
+echo 1 > /proc/sys/net/ipv4/conf/all/rp_filter
+
+# Log packets with impossible source addresses
+echo 1 > /proc/sys/net/ipv4/conf/all/log_martians
+
+# Configure iptables path
+iptables=$(/usr/bin/which iptables)
+ip6tables=$(/usr/bin/which ip6tables)
+
+# Configure ifconfig path
+ifconfig=$(which ifconfig)
+#Tun Network
+	tun_ip="1x.x.x.x"
+	tun_dns="x.x.x.x"
+	tun_interface="tun0"
+
+#LAN Network
+	ip="x.x.x.x"
+	router="x.x.1.1"
+	dns="x.x.x.x"
+
+# Flush all chains
+${iptables} --flush
+${ip6tables} --flush
+
+# Allow unlimited traffic on the loopback interface
+${iptables} -A INPUT -i lo -j ACCEPT
+${iptables} -A OUTPUT -o lo -j ACCEPT
+
+# Set default policies to IPv4 && IPv6
+${iptables} --policy INPUT DROP
+${iptables} --policy OUTPUT DROP
+${iptables} --policy FORWARD DROP
+
+${ip6tables} --policy INPUT DROP
+${ip6tables} --policy OUTPUT DROP
+${ip6tables} --policy FORWARD DROP
+
+interface_intro=$(${ifconfig} | grep "flags" | cut -d ":" -f1 | grep -v lo)
+number=$(${ifconfig} | grep "flags" | cut -d ":" -f1 | grep -v lo  | wc -l)
+counter=1
+
+copy=$(while [ "${counter}" -le "${number}" ]; do
+        for i in $(echo "${interface_intro}"); do
+       echo "${counter}" ${i}
+       let counter=${counter}+1
+                        done
+                            done)
+echo "${copy}"
+		echo -e -n "${greenColour}What interface do you want to use?${endColour} "; read me
+
+	execute=$(echo "${copy}" | grep "${me}")
+	interface=$(echo "${execute}" | cut -d " " -f2)
+
+# Allow unlimited outbound traffic
+${iptables} -A INPUT  -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+${iptables} -A OUTPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+
+# INPUT (Allow certain ports to be accessible from the outside)
+#${iptables} -A INPUT -i ${interface} -p tcp --dport 8080 -j ACCEPT # HTTP-proxy
+#${iptables} -A INPUT -i ${interface} -p tcp --dport 9090 -j ACCEPT # Updog
+
+# INPUT (Aditional rules)
+${iptables} -A INPUT -m conntrack --ctstate INVALID -j DROP # Block Invalid packet
+${iptables} -A INPUT -p tcp --tcp-flags ALL NONE -j DROP # Block Null packet
+${iptables} -A INPUT -p tcp -m connlimit --connlimit-above 111 -j REJECT --reject-with tcp-reset # Ratelimint 111
+${iptables} -A INPUT -p tcp --tcp-flags RST RST -m limit --limit 2/s --limit-burst 2 -j ACCEPT	 # RST pkt
+
+# Ratelimit SSH for attack protection
+${iptables} -A INPUT -p tcp --dport 22 -m state --state NEW -m recent --update --seconds 60 --hitcount 4 -j DROP
+${iptables} -A INPUT -p tcp --dport 22 -m state --state NEW -m recent --set
+${iptables} -A INPUT -p tcp --dport 22 -m state --state NEW -j ACCEPT
+
+# OUTPUT (Reverse shell via TCP or UDP can be posible)
+
+${iptables} -A OUTPUT -o ${interface} -p icmp --icmp-type echo-request -j ACCEPT # ICMP
+
+${iptables} -A OUTPUT -o ${interface} -p tcp -s ${ip} --sport 1024:65535 -m multiport --dports 20,21 -j ACCEPT # FTP-DATA & FTP (Active mode)
+
+${iptables} -A OUTPUT -o ${interface} -p tcp -s ${ip} --sport 1024:65535 --dport 22 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT # SSH
+
+${iptables} -A OUTPUT -o ${interface} -p udp -s ${ip} -d ${dns} --sport 1024:65535 --dport 53 -m state --state NEW -j ACCEPT # DNS (UDP)
+${iptables} -A OUTPUT -o ${tun_interface} -p udp -s ${tun_ip} -d ${tun_dns} --sport 1024:65535 --dport 53 -m state --state NEW -j ACCEPT -m comment --comment "DNS (VPN)" # DNS (UDP) (VPN)
+
+${iptables} -A OUTPUT -o ${interface} -p tcp -s ${ip} --sport 1024:65535 -m multiport --dports 80,443 -j ACCEPT # HTTP & HTTPS
+${iptables} -A OUTPUT -o ${tun_interface} -p tcp -s ${tun_ip} --sport 1024:65535 -m multiport --dports 80,443 -j ACCEPT  -m comment --comment "HTTP & HTTPS (VPN)" # HTTP & HTTPS (VPN)
+
+${iptables} -A OUTPUT -o ${interface} -p tcp -s ${ip} --sport 1024:65535 -m multiport --dports 465,587 -j ACCEPT # SMTP
+${iptables} -A OUTPUT -o ${interface} -p tcp -s ${ip} --sport 1024:65535 --dport 993 -m state --state NEW,ESTABLISHED -j ACCEPT # IMAP
+
+${iptables} -A OUTPUT -o ${interface} -p tcp -s ${ip} --sport 1024:65535 -d ${router} --dport 3000 -j ACCEPT # NTOP
+
+${iptables} -A OUTPUT -o ${interface} -p tcp -s ${ip} --sport 1024:65535 --dport 4443 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT # NEXTCLOUD MANAGER
+
+${iptables} -A OUTPUT -o ${interface} -p udp -s ${ip} --sport 1024:65535 --dport 19303:19308 -m state --state NEW,ESTABLISHED -j ACCEPT # VoIP Hangousts
+
+${iptables} -A OUTPUT -o ${interface} -p udp -s ${ip} --sport 1024:65535 --dport 50000:50050 -m state --state NEW,ESTABLISHED -j ACCEPT # VoIP Discord
+${iptables} -A OUTPUT -o ${tun_interface} -p udp -s ${tun_ip} --sport 1024:65535 --dport 50000:50050 -m state --state NEW,ESTABLISHED -j ACCEPT  -m comment --comment "VoIP Discord (VPN)" # VoIP Discord (VPN)
+
+# Drop all other traffic
+${iptables} -A INPUT -j REJECT
+${iptables} -A OUTPUT -j REJECT
+
+
+echo -e -n "${greenColour}Do you want print these new rules${endColour} (${purpleColour}y${endColour}/${redColour}N${endColour}) "; read choice
+case ${choice} in
+  		y|Y )
+
+	    clear &&  printf "${turquoiseColour}\n 				--IPv4--			 \n${endColour}"
+	        grc ${iptables}  -nL -v
+	              printf "${turquoiseColour}\n 	 			--IPv6-- 			 \n${endColour}"
+            grc ${ip6tables} -nL -v
+            echo -e "${greenColour}\n Rules displayed...\n${endColour}"
+            ;;
+        * )
+            echo -e "${redColour}Not show${endColour}"
+            ;;
+esac
+
+echo -e -n "${greenColour}Do you want to make these changes pemanent?${endColour} (${purpleColour}y${endColour}/${redColour}N${endColour}): "; read choice
+case ${choice} in
+           y|Y )
+
+    source /etc/os-release
+    case ${ID} in
+        "arch" )
+                ipsave=$(/usr/bin/which iptables-save)
+                ip6save=$(/usr/bin/which ip6tables-save)
+                ${ipsave} > /etc/iptables/iptables.rules
+                ${ip6save} > /etc/iptables/ip6tables.rules
+                ;;
+
+        "debian" )
+                  pushd /etc/init.d/ > /dev/null 2>&1
+                  bash netfilter-persistent save
+                  popd > /dev/null 2>&1
+                ;;
+
+        "centos" )
+                chkconfig=$(/usr/bin/which chkconfig)
+                service=$(/usr/bin/which service)
+                ${chkconfig} iptables on
+                ${service} iptables save
+                ${chkconfig} ip6tables on
+                ${service} ip6tables save
+                ;;
+
+               * )
+            echo -e "${redColour}ERROR: Distribuition not available for auto-save feature${endColour}"
+            echo -e "${blueColour}\nIptables configuration completed!${endColour}"
+            exit 1
+            ;;
+        esac
+        echo -e "${greenColour}Saving configuration...${endColour}"
+        echo -e "${blueColour}\nIptables configuration completed!${blueColour}"
+        exit 1
+        ;;
+    esac
+    echo -e "${redColour}Unsaved rules!!${endColour}" && echo -e "${blueColour}\nIptables configuration completed!${endColour}"
+    exit 1
+  ;;
+esac

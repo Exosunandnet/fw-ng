@@ -1,0 +1,3 @@
+#!/bin/bash
+bash /etc/fw-ng/fwclear
+bash /etc/fw-ng/fw
